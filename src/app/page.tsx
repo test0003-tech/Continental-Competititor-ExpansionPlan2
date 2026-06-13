@@ -15,9 +15,11 @@ import {
   Radio,
   ArrowRight,
   CheckCircle2,
+  Globe2,
+  Globe,
 } from "lucide-react";
 import type { Dealer } from "@/lib/types";
-import { BRAND_CONFIG } from "@/lib/types";
+import { BRAND_CONFIG, CONTINENTAL_SUB_BRANDS } from "@/lib/types";
 
 const ScrapingMap = dynamic(() => import("@/components/ScrapingMapComponent"), {
   ssr: false,
@@ -224,7 +226,7 @@ const UNIQUE_BRANDS = [...new Set(TIRE_BRANDS)].sort((a, b) =>
 );
 
 // Step types
-type Step = "search" | "auditing" | "competitors" | "scraping" | "dashboard";
+type Step = "search" | "auditing" | "competitors" | "scraping" | "dashboard" | "worldwide_scraping" | "worldwide_dashboard";
 
 // Audit messages
 const AUDIT_MESSAGES = [
@@ -265,6 +267,11 @@ export default function LandingPage() {
   const [brandScrapeCounts, setBrandScrapeCounts] = useState<Record<string, number>>({});
   const [dataLoaded, setDataLoaded] = useState(false);
   const [currentScrapingBrand, setCurrentScrapingBrand] = useState<string>("");
+  const [worldwideDealers, setWorldwideDealers] = useState<Dealer[]>([]);
+  const [worldwideScrapedDealers, setWorldwideScrapedDealers] = useState<Dealer[]>([]);
+  const [worldwideScrapeCounts, setWorldwideScrapeCounts] = useState<Record<string, number>>({});
+  const [worldwideScrapeProgress, setWorldwideScrapeProgress] = useState(0);
+  const [worldwideCurrentBrand, setWorldwideCurrentBrand] = useState<string>("");
   const searchRef = useRef<HTMLDivElement>(null);
 
   // Load dealer data
@@ -443,6 +450,125 @@ export default function LandingPage() {
       () => scrapeNextCompetitor(0)
     );
   }, [dealers, selectedBrand]);
+
+  // ─── Start Worldwide Scraping ───
+  const startWorldwideScraping = useCallback(() => {
+    setStep("worldwide_scraping");
+    setWorldwideScrapedDealers([]);
+    setWorldwideScrapeCounts({});
+    setWorldwideScrapeProgress(0);
+
+    // Fetch worldwide data
+    fetch("/continental_worldwide_min.json")
+      .then((r) => r.json())
+      .then((data: Array<[number, number, string]>) => {
+        // Convert minimal format to Dealer objects
+        const converted: Dealer[] = data.map(([lat, lng, brandKey], idx) => {
+          const brandConfig = CONTINENTAL_SUB_BRANDS[brandKey];
+          return {
+            brand: brandConfig?.label || brandKey,
+            brandKey,
+            color: brandConfig?.color || "#999",
+            name: "",
+            address: "",
+            city: "",
+            state: "",
+            country: "",
+            pincode: "",
+            phone: "",
+            lat,
+            lng,
+            type: "",
+          };
+        });
+        setWorldwideDealers(converted);
+        runWorldwideScraping(converted);
+      })
+      .catch(console.error);
+  }, []);
+
+  function runWorldwideScraping(allDealers: Dealer[]) {
+    const totalDealers = allDealers.length;
+    const totalDuration = 45000;
+    const intervalMs = 100;
+    const totalIntervals = totalDuration / intervalMs;
+    const dealersPerInterval = Math.ceil(totalDealers / totalIntervals);
+
+    // Group by brand for sequential scraping
+    const brandOrder = Object.entries(CONTINENTAL_SUB_BRANDS)
+      .sort(([, a], [, b]) => a.priority - b.priority);
+
+    const brandBatches: { key: string; label: string; dealers: Dealer[] }[] = [];
+    for (const [key, config] of brandOrder) {
+      const batch = allDealers.filter((d) => d.brandKey === key);
+      if (batch.length > 0) {
+        brandBatches.push({ key, label: config.label, dealers: batch });
+      }
+    }
+
+    let globalIdx = 0;
+    let globalElapsed = 0;
+
+    function scrapeNextBrand(batchIdx: number) {
+      if (batchIdx >= brandBatches.length) {
+        setWorldwideScrapeProgress(100);
+        setTimeout(() => setStep("worldwide_dashboard"), 1500);
+        return;
+      }
+
+      const batch = brandBatches[batchIdx];
+      setWorldwideCurrentBrand(batch.label);
+
+      const brandDuration = (batch.dealers.length / totalDealers) * totalDuration;
+      const brandIntervals = Math.ceil(brandDuration / intervalMs);
+      const dealersPerTick = Math.ceil(batch.dealers.length / brandIntervals);
+      let brandIdx = 0;
+      let brandElapsed = 0;
+
+      const interval = setInterval(() => {
+        brandElapsed += intervalMs;
+        globalElapsed += intervalMs;
+
+        const end = Math.min(brandIdx + dealersPerTick, batch.dealers.length);
+        const tickDealers = batch.dealers.slice(brandIdx, end);
+
+        if (tickDealers.length > 0) {
+          setWorldwideScrapedDealers((prev) => [...prev, ...tickDealers]);
+          setWorldwideScrapeCounts((prev) => {
+            const next = { ...prev };
+            for (const d of tickDealers) {
+              next[d.brandKey] = (next[d.brandKey] || 0) + 1;
+            }
+            return next;
+          });
+        }
+
+        brandIdx = end;
+        globalIdx += tickDealers.length;
+        const pct = Math.min(Math.round((globalElapsed / totalDuration) * 100), 100);
+        setWorldwideScrapeProgress(pct);
+
+        if (brandIdx >= batch.dealers.length || brandElapsed >= brandDuration) {
+          // Add remaining
+          const remaining = batch.dealers.slice(brandIdx);
+          if (remaining.length > 0) {
+            setWorldwideScrapedDealers((prev) => [...prev, ...remaining]);
+            setWorldwideScrapeCounts((prev) => {
+              const next = { ...prev };
+              for (const d of remaining) {
+                next[d.brandKey] = (next[d.brandKey] || 0) + 1;
+              }
+              return next;
+            });
+          }
+          clearInterval(interval);
+          scrapeNextBrand(batchIdx + 1);
+        }
+      }, intervalMs);
+    }
+
+    scrapeNextBrand(0);
+  }
 
   // ─── RENDER: Search Step ───
   if (step === "search") {
@@ -681,18 +807,29 @@ export default function LandingPage() {
             })}
           </div>
 
-          {/* Scrap button */}
-          <Button
-            onClick={startScraping}
-            className="w-full py-6 text-lg font-semibold bg-gradient-to-r from-red-600 to-orange-600 hover:from-red-500 hover:to-orange-500 text-white rounded-xl transition-all hover:scale-[1.01] active:scale-[0.99] shadow-lg shadow-red-500/20"
-          >
-            <Zap className="w-5 h-5 mr-2" />
-            Scrap Them All
-            <ArrowRight className="w-5 h-5 ml-2" />
-          </Button>
+          {/* Action buttons */}
+          <div className="space-y-3">
+            <Button
+              onClick={startScraping}
+              className="w-full py-6 text-lg font-semibold bg-gradient-to-r from-red-600 to-orange-600 hover:from-red-500 hover:to-orange-500 text-white rounded-xl transition-all hover:scale-[1.01] active:scale-[0.99] shadow-lg shadow-red-500/20"
+            >
+              <Zap className="w-5 h-5 mr-2" />
+              Scrap India Competitors
+              <ArrowRight className="w-5 h-5 ml-2" />
+            </Button>
+
+            <Button
+              onClick={startWorldwideScraping}
+              className="w-full py-6 text-lg font-semibold bg-gradient-to-r from-yellow-500 to-amber-500 hover:from-yellow-400 hover:to-amber-400 text-black rounded-xl transition-all hover:scale-[1.01] active:scale-[0.99] shadow-lg shadow-yellow-500/20"
+            >
+              <Globe className="w-5 h-5 mr-2" />
+              Explore Continental Worldwide
+              <ArrowRight className="w-5 h-5 ml-2" />
+            </Button>
+          </div>
 
           <p className="text-center text-gray-600 text-xs mt-3">
-            This will scrape all dealer locations — Continental first, then competitors — and display them on the map
+            "Scrap India Competitors" maps India dealers — "Explore Continental Worldwide" maps 127,000+ dealers across 63 countries
           </p>
         </div>
       </div>
@@ -866,9 +1003,163 @@ export default function LandingPage() {
     );
   }
 
-  // ─── RENDER: Dashboard (after scraping complete) ───
+  // ─── RENDER: Dashboard (after India scraping complete) ───
   if (step === "dashboard") {
     return <DashboardView dealers={dealers} />;
+  }
+
+  // ─── RENDER: Worldwide Scraping Step ───
+  if (step === "worldwide_scraping") {
+    const subBrandList = Object.entries(CONTINENTAL_SUB_BRANDS)
+      .sort(([, a], [, b]) => a.priority - b.priority);
+
+    return (
+      <div className="h-screen bg-[#0a0a1a] flex flex-col relative overflow-hidden">
+        {/* Top progress bar */}
+        <div className="bg-gray-900/90 border-b border-gray-800/50 px-4 py-3 shrink-0 z-20">
+          <div className="flex items-center gap-4 max-w-screen-2xl mx-auto">
+            <div className="flex items-center gap-2 shrink-0">
+              <Globe2 className="w-5 h-5 text-yellow-500 animate-pulse" />
+              <span className="text-white font-semibold text-sm hidden sm:inline">Worldwide Scraping</span>
+            </div>
+
+            <div className="flex-1">
+              <div className="w-full bg-gray-800 rounded-full h-2.5 overflow-hidden">
+                <div
+                  className="h-full bg-gradient-to-r from-yellow-500 via-amber-400 to-yellow-300 rounded-full transition-all duration-200 ease-out relative"
+                  style={{ width: `${worldwideScrapeProgress}%` }}
+                >
+                  <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/30 to-transparent animate-shimmer" />
+                </div>
+              </div>
+            </div>
+
+            <span className="text-yellow-500 font-mono font-bold text-sm shrink-0">{worldwideScrapeProgress}%</span>
+
+            <div className="flex items-center gap-1.5 shrink-0">
+              <Radio className="w-3.5 h-3.5 text-green-400 animate-pulse" />
+              <span className="text-gray-400 text-xs hidden md:inline">
+                {worldwideCurrentBrand ? `Scraping ${worldwideCurrentBrand}` : "Loading..."}
+              </span>
+            </div>
+
+            <Badge className="bg-yellow-500/10 border-yellow-500/20 text-yellow-400 shrink-0">
+              <MapPin className="w-3 h-3 mr-1" />
+              {worldwideScrapedDealers.length.toLocaleString()} / {worldwideDealers.length > 0 ? worldwideDealers.length.toLocaleString() : "127,873"}
+            </Badge>
+          </div>
+
+          {worldwideCurrentBrand && (
+            <div className="mt-2 flex items-center gap-2 max-w-screen-2xl mx-auto">
+              <div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse" />
+              <span className="text-yellow-400 text-xs font-medium">
+                Now scraping: {worldwideCurrentBrand}
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* Main content: Sidebar + Map */}
+        <div className="flex-1 flex overflow-hidden">
+          {/* Left sidebar */}
+          <div className="w-72 bg-gray-900/60 border-r border-gray-800/50 overflow-y-auto shrink-0 hidden md:block">
+            <div className="p-4 border-b border-gray-800/50">
+              <div className="text-xs text-gray-500 uppercase tracking-wider mb-3 font-semibold">Continental Group — Worldwide</div>
+              <div className="text-gray-300 text-sm">
+                {worldwideScrapedDealers.length.toLocaleString()} dealers across 63 countries
+              </div>
+            </div>
+
+            <div className="p-4">
+              <div className="text-xs text-gray-500 uppercase tracking-wider mb-3 font-semibold">Sub-Brands Scraped</div>
+              <div className="space-y-2">
+                {subBrandList.map(([key, config]) => {
+                  const count = worldwideScrapeCounts[key] || 0;
+                  const total = worldwideDealers.length > 0
+                    ? worldwideDealers.filter((d) => d.brandKey === key).length
+                    : 0;
+                  const pct = total > 0 ? Math.round((count / total) * 100) : 0;
+                  const isCurrentlyScraping = worldwideCurrentBrand === config.label;
+                  return (
+                    <div
+                      key={key}
+                      className={`p-2.5 rounded-lg border transition-all ${
+                        isCurrentlyScraping
+                          ? "bg-gray-700/40 border-yellow-500/30"
+                          : "bg-gray-800/40 border-gray-700/30"
+                      }`}
+                    >
+                      <div className="flex items-center gap-2 mb-1.5">
+                        <div
+                          className="w-2 h-2 rounded-full shrink-0"
+                          style={{ backgroundColor: config.color }}
+                        />
+                        <span className="text-gray-300 text-xs font-medium truncate">{config.label}</span>
+                        <span className="text-gray-500 text-xs ml-auto shrink-0">{count.toLocaleString()}</span>
+                      </div>
+                      <div className="w-full bg-gray-700/30 rounded-full h-1">
+                        <div
+                          className="h-full rounded-full transition-all duration-300"
+                          style={{ width: `${pct}%`, backgroundColor: config.color }}
+                        />
+                      </div>
+                      {isCurrentlyScraping && (
+                        <div className="text-yellow-400 text-[10px] mt-1 flex items-center gap-1">
+                          <div className="w-1.5 h-1.5 rounded-full bg-yellow-400 animate-pulse" />
+                          Scraping...
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+
+          {/* Map - worldwide center */}
+          <div className="flex-1 relative">
+            {worldwideScrapedDealers.length > 0 ? (
+              <ScrapingMap
+                dealers={worldwideScrapedDealers}
+                center={[30, 10]}
+                zoom={3}
+                selectedBrands={new Set(Object.keys(CONTINENTAL_SUB_BRANDS))}
+                mapMode="dots"
+              />
+            ) : (
+              <div className="w-full h-full flex items-center justify-center">
+                <div className="text-center">
+                  <Globe2 className="w-16 h-16 text-yellow-500/30 mx-auto mb-4 animate-pulse" />
+                  <p className="text-gray-500">Loading worldwide dealer data...</p>
+                </div>
+              </div>
+            )}
+
+            {/* Mobile brand pills */}
+            <div className="absolute bottom-4 left-4 right-4 md:hidden flex gap-2 overflow-x-auto pb-2">
+              {subBrandList.map(([key, config]) => {
+                const count = worldwideScrapeCounts[key] || 0;
+                return (
+                  <div
+                    key={key}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-900/90 backdrop-blur-sm rounded-full border border-gray-700/50 shrink-0"
+                  >
+                    <div className="w-2 h-2 rounded-full" style={{ backgroundColor: config.color }} />
+                    <span className="text-white text-xs">{config.label}</span>
+                    <span className="text-gray-400 text-xs">{count.toLocaleString()}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ─── RENDER: Worldwide Dashboard (after worldwide scraping complete) ───
+  if (step === "worldwide_dashboard") {
+    return <DashboardView dealers={worldwideScrapedDealers.length > 0 ? worldwideScrapedDealers : worldwideDealers} />;
   }
 
   return null;

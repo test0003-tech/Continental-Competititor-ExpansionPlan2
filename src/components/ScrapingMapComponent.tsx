@@ -4,7 +4,7 @@ import { useEffect, useRef, useCallback } from "react";
 import L from "leaflet";
 import "leaflet.heat";
 import type { Dealer } from "@/lib/types";
-import { BRAND_CONFIG } from "@/lib/types";
+import { BRAND_CONFIG, CONTINENTAL_SUB_BRANDS } from "@/lib/types";
 
 interface ScrapingMapProps {
   dealers: Dealer[];
@@ -191,10 +191,10 @@ export default function ScrapingMapComponent({
         d.lng !== 0 &&
         !isNaN(d.lat) &&
         !isNaN(d.lng) &&
-        d.lat >= 6 &&
-        d.lat <= 37 &&
-        d.lng >= 68 &&
-        d.lng <= 98
+        d.lat >= -90 &&
+        d.lat <= 90 &&
+        d.lng >= -180 &&
+        d.lng <= 180
     );
 
     for (const dealer of validNewDealers) {
@@ -204,18 +204,21 @@ export default function ScrapingMapComponent({
 
       if (mapMode === "dots") {
         let options: L.CircleMarkerOptions;
-        if (isContinental) {
+        // Get color from either BRAND_CONFIG (India competitors) or CONTINENTAL_SUB_BRANDS (worldwide)
+        const brandConfig = BRAND_CONFIG[dealer.brandKey] || CONTINENTAL_SUB_BRANDS[dealer.brandKey];
+        const color = brandConfig?.color || dealer.color || "#999";
+        const isMainBrand = isContinental;
+
+        if (isMainBrand) {
           options = {
             radius: getContinentalRadius(currentZoom),
-            fillColor: "#FFD700",
+            fillColor: color,
             color: "#B8860B",
             weight: getContinentalWeight(currentZoom),
             opacity: getContinentalOpacity(currentZoom),
             fillOpacity: getContinentalFillOpacity(currentZoom),
           };
         } else {
-          const config = BRAND_CONFIG[dealer.brandKey];
-          const color = config?.color || "#999";
           options = {
             radius: getCompetitorRadius(currentZoom),
             fillColor: color,
